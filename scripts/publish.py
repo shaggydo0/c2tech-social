@@ -38,7 +38,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 POSTS = ROOT / 'posts'
 NETWORKS = ('facebook', 'instagram')
-KINDS = ('image', 'carousel')
+KINDS = ('image', 'carousel', 'reel')
 
 # Límites de Instagram (documentación de Content Publishing).
 CAPTION_MAX = 2200
@@ -96,7 +96,16 @@ def load_post(folder: Path) -> dict:
     data['caption'] = caption
 
     images = data.get('images') or []
-    if not images:
+    if data.get('kind') == 'reel':
+        video = data.get('video')
+        if not video:
+            problems.append('un reel lleva video')
+        elif not (folder / video).is_file():
+            problems.append(f'no existe {video}')
+        elif Path(video).suffix.lower() != '.mp4':
+            problems.append(f'{video}: el reel va en MP4 (H.264)')
+        images = [data['cover']] if data.get('cover') else []
+    elif not images:
         problems.append('falta images')
     if data.get('kind') == 'image' and len(images) != 1:
         problems.append('un post image lleva exactamente una imagen')
@@ -129,10 +138,13 @@ def save_state(post: dict, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
-# --- Imágenes en R2 -------------------------------------------------------
+# --- Archivos en R2 -------------------------------------------------------
+
+CONTENT_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.mp4': 'video/mp4'}
 
 
-def upload_images(post: dict) -> list[str]:
+def upload_media(post: dict) -> dict[str, str]:
+    """Sube las imágenes (y el video de un reel) y devuelve nombre → URL pública."""
     import boto3
 
     bucket = os.environ.get('R2_BUCKET', 'c2tech-social')
@@ -144,11 +156,12 @@ def upload_images(post: dict) -> list[str]:
         aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
         region_name='auto',
     )
-    urls = []
-    for name in post['images']:
+    urls = {}
+    for name in [*post['images'], *([post['video']] if post.get('video') else [])]:
         key = f"{post['slug']}/{name}"
-        s3.upload_file(str(post['folder'] / name), bucket, key, ExtraArgs={'ContentType': 'image/jpeg'})
-        urls.append(f'{base}/{key}')
+        content_type = CONTENT_TYPES[Path(name).suffix.lower()]
+        s3.upload_file(str(post['folder'] / name), bucket, key, ExtraArgs={'ContentType': content_type})
+        urls[name] = f'{base}/{key}'
     return urls
 
 
@@ -188,7 +201,10 @@ class Graph:
 
     # Facebook
 
-    def facebook(self, page_id: str, page_token: str, post: dict, urls: list[str]) -> str:
+    def facebook(self, page_id: str, page_token: str, post: dict, media: dict[str, str]) -> str:
+        if post['kind'] == 'reel':
+            return self.facebook_reel(page_id, page_token, post, media[post['video']])
+        urls = [media[name] for name in post['images']]
         if post['kind'] == 'image':
             result = self.call('POST', f'{page_id}/photos', token=page_token, url=urls[0], message=post['caption'])
             return result.get('post_id') or result['id']
@@ -200,20 +216,47 @@ class Graph:
                            attached_media=json.dumps(media))
         return result['id']
 
+    def facebook_reel(self, page_id: str, page_token: str, post: dict, video_url: str) -> str:
+        # Reels Publishing API: iniciar, subir desde la URL de R2, esperar y publicar.
+        video_id = self.call('POST', f'{page_id}/video_reels', token=page_token, upload_phase='start')['video_id']
+        upload = self.http.post(f"https://rupload.facebook.com/video-upload/{self.base.rsplit('/', 1)[1]}/{video_id}",
+                                headers={'Authorization': f'OAuth {page_token}', 'file_url': video_url}, timeout=120)
+        if not upload.ok or not upload.json().get('success'):
+            raise RuntimeError(f'Facebook no tomó el video: {upload.text[:300]}')
+        for _ in range(20):
+            status = self.call('GET', video_id, token=page_token, fields='status').get('status', {})
+            if status.get('video_status') in ('upload_failed', 'error', 'expired'):
+                raise RuntimeError(f'El video {video_id} quedó en {status}')
+            if status.get('uploading_phase', {}).get('status') == 'complete' or status.get('video_status') in ('upload_complete', 'processing', 'ready'):
+                break
+            time.sleep(15)
+        self.call('POST', f'{page_id}/video_reels', token=page_token, upload_phase='finish', video_id=video_id,
+                  video_state='PUBLISHED', description=post['caption'])
+        return video_id
+
     # Instagram
 
-    def _wait(self, container: str, token: str) -> None:
-        # Meta recomienda consultar una vez por minuto, no más de 5 minutos.
-        for _ in range(10):
+    def _wait(self, container: str, token: str, attempts: int = 10) -> None:
+        # Meta recomienda consultar una vez por minuto, no más de 5 minutos (un video puede tardar más).
+        for _ in range(attempts):
             status = self.call('GET', container, token=token, fields='status_code')['status_code']
             if status == 'FINISHED':
                 return
             if status in ('ERROR', 'EXPIRED'):
                 raise RuntimeError(f'El contenedor {container} quedó en {status}')
             time.sleep(30)
-        raise RuntimeError(f'El contenedor {container} no terminó de procesarse en 5 minutos')
+        raise RuntimeError(f'El contenedor {container} no se terminó de procesar')
 
-    def instagram(self, ig_id: str, token: str, post: dict, urls: list[str]) -> str:
+    def instagram(self, ig_id: str, token: str, post: dict, media: dict[str, str]) -> str:
+        if post['kind'] == 'reel':
+            params = {'media_type': 'REELS', 'video_url': media[post['video']], 'caption': post['caption'],
+                      'share_to_feed': 'true'}
+            if post.get('cover'):
+                params['cover_url'] = media[post['cover']]
+            container = self.call('POST', f'{ig_id}/media', token=token, **params)['id']
+            self._wait(container, token, attempts=20)
+            return self.call('POST', f'{ig_id}/media_publish', token=token, creation_id=container)['id']
+        urls = [media[name] for name in post['images']]
         if post['kind'] == 'image':
             container = self.call('POST', f'{ig_id}/media', token=token, image_url=urls[0],
                                   caption=post['caption'])['id']
@@ -355,9 +398,9 @@ def main() -> int:
     for post, pending in due:
         state = published_state(post)
         try:
-            urls = upload_images(post)
+            urls = upload_media(post)
         except Exception as error:  # noqa: BLE001 — se informa y se sigue con el resto
-            print(f"ERROR {post['slug']}: no se pudieron subir las imágenes: {error}")
+            print(f"ERROR {post['slug']}: no se pudieron subir los archivos: {error}")
             failed = True
             continue
         for network in pending:

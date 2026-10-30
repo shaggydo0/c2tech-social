@@ -21,7 +21,7 @@ posts/2026-11-02-ya-te-toca/
 
 ```yaml
 publish_at: 2026-11-02T12:00:00-03:00   # siempre con zona horaria
-kind: carousel                           # image | carousel
+kind: carousel                           # image | carousel | reel
 networks: [facebook, instagram]          # por defecto, las dos
 images: [sifen-1.jpg, sifen-2.jpg]
 caption: |
@@ -53,4 +53,12 @@ Variable opcional: `META_PAGE_ID`, si el token ve más de una página. Sin `META
 ## Límites
 
 - Instagram: sólo JPEG, hasta 2.200 caracteres y 30 hashtags; acá los carruseles van de 2 a 10 imágenes.
-- Los reels todavía no se publican desde acá: se suben a mano hasta que se sume el video al script.
+- Reels: `kind: reel`, `video: reel.mp4` (H.264, 9:16, de 3 a 90 s, audio AAC 48 kHz) y `cover:` opcional (JPEG). En Facebook van por la Reels Publishing API.
+
+## Grabaciones del panel
+
+`scripts/grabaciones/` graba el panel de KudeExpress sobre la empresa demo (`LandingDemoSeeder`), nunca sobre datos reales, y deja el MP4 vertical listo. Cada script dice qué datos necesita la demo. Hace falta `ffmpeg` con libx264 (`FFMPEG=/ruta/a/ffmpeg`).
+
+```bash
+FFMPEG=… node scripts/grabaciones/facturacion-masiva.mjs posts/<slug>/reel.mp4
+```
