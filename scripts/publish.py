@@ -45,6 +45,9 @@ CAPTION_MAX = 2200
 HASHTAGS_MAX = 30
 CAROUSEL_MAX = 10  # Instagram admite 20, Facebook arma bien hasta 10: usamos el menor.
 
+# Las horas a las que corre la tarea Publicar (hora de Paraguay).
+PUBLISH_TIMES = ('12:00', '19:00')
+
 
 class PostError(Exception):
     pass
@@ -68,6 +71,8 @@ def load_post(folder: Path) -> dict:
     if isinstance(when, dt.datetime):
         if when.tzinfo is None:
             problems.append('publish_at necesita zona horaria (Paraguay es -03:00)')
+        elif when.astimezone(dt.timezone(dt.timedelta(hours=-3))).strftime('%H:%M') not in PUBLISH_TIMES:
+            problems.append(f"publish_at tiene que ser a las {' o a las '.join(PUBLISH_TIMES)} de Paraguay (la tarea corre sólo a esas horas)")
         data['publish_at'] = when
     else:
         problems.append('falta publish_at')

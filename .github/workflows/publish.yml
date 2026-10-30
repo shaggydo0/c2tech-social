@@ -1,11 +1,12 @@
 name: Publicar
 
-# Cada 30 minutos entre las 8:00 y las 20:30 de Paraguay (UTC-3). Un repo
-# privado en el plan gratuito tiene 2.000 minutos de Actions por mes; así se
-# usan unos 800. GitHub puede demorar un cron programado varios minutos.
+# A las 12:05 y a las 19:05 de Paraguay (UTC-3): los posts se programan a las
+# 12:00 o a las 19:00. Los minutos gratis de Actions (2.000 por mes en repos
+# privados) los comparte toda la cuenta y el CI de kudeexpress los agota; así
+# esto usa unos 60 por mes. GitHub puede demorar un cron varios minutos.
 on:
   schedule:
-    - cron: '*/30 11-23 * * *'
+    - cron: '5 15,22 * * *'
   workflow_dispatch:
     inputs:
       only:
