@@ -11,11 +11,12 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const logo = pathToFileURL(path.join(root, 'assets/kudeexpress-logo.png')).href;
+// Incrustado: una página armada con setContent no puede leer file://.
+const logo = `data:image/png;base64,${(await readFile(path.join(root, 'assets/kudeexpress-logo.png'))).toString('base64')}`;
 
 const slugs = process.argv.slice(2);
 const folders = slugs.length ? slugs : (await readdir(path.join(root, 'posts')));
