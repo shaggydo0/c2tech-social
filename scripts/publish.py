@@ -9,6 +9,7 @@ Uso:
     python scripts/publish.py --check          # valida todos los posts, no publica
     python scripts/publish.py                  # publica lo vencido (necesita los secretos)
     python scripts/publish.py --only <slug>    # sólo ese post, aunque no haya llegado su hora
+    python scripts/publish.py --verify         # prueba el token y R2 sin publicar nada
 
 Variables de entorno (secretos de GitHub Actions):
     META_TOKEN            token del usuario del sistema de la cartera C2 TECH E.A.S.
@@ -18,7 +19,7 @@ Variables de entorno (secretos de GitHub Actions):
 Opcionales:
     META_PAGE_ID          si el token ve más de una página
     R2_BUCKET             por defecto c2tech-social
-    MEDIA_BASE_URL        por defecto https://media.kudeexpress.com
+    MEDIA_BASE_URL        por defecto https://media.c2tech.com.py
     GRAPH_VERSION         por defecto v23.0
 """
 
@@ -130,7 +131,7 @@ def upload_images(post: dict) -> list[str]:
     import boto3
 
     bucket = os.environ.get('R2_BUCKET', 'c2tech-social')
-    base = os.environ.get('MEDIA_BASE_URL', 'https://media.kudeexpress.com').rstrip('/')
+    base = os.environ.get('MEDIA_BASE_URL', 'https://media.c2tech.com.py').rstrip('/')
     s3 = boto3.client(
         's3',
         endpoint_url=os.environ['R2_ENDPOINT'],
@@ -224,6 +225,80 @@ class Graph:
         return self.call('POST', f'{ig_id}/media_publish', token=token, creation_id=container)['id']
 
 
+# --- Verificación ---------------------------------------------------------
+
+REQUIRED_SCOPES = {
+    'pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'read_insights',
+    'instagram_basic', 'instagram_content_publish', 'instagram_manage_insights',
+    'business_management', 'ads_read', 'ads_management',
+}
+
+
+def verify() -> int:
+    """Prueba lo que necesita una publicación, sin publicar nada."""
+    ok = True
+
+    if not os.environ.get('META_TOKEN'):
+        print('FALTA el secret META_TOKEN')
+        ok = False
+    else:
+        graph = Graph(os.environ['META_TOKEN'])
+        try:
+            granted = {p['permission'] for p in graph.call('GET', 'me/permissions').get('data', [])
+                       if p.get('status') == 'granted'}
+            missing = sorted(REQUIRED_SCOPES - granted)
+            print('ok    permisos del token' if not missing else f"FALTAN permisos en el token: {', '.join(missing)}")
+            ok = ok and not missing
+        except Exception as error:  # noqa: BLE001
+            print(f'ERROR al leer los permisos del token: {error}')
+            ok = False
+        try:
+            page_id, page_token, ig_id = graph.page()
+            page = graph.call('GET', page_id, token=page_token, fields='name')
+            print(f"ok    página: {page['name']} ({page_id})")
+            if ig_id:
+                ig = graph.call('GET', ig_id, token=page_token, fields='username')
+                print(f"ok    Instagram: @{ig['username']} ({ig_id})")
+                limit = graph.call('GET', f'{ig_id}/content_publishing_limit', token=page_token, fields='quota_usage,config')
+                print(f'ok    límite de publicación de Instagram: {limit.get("data", [{}])[0]}')
+            else:
+                print('FALTA la cuenta de Instagram vinculada a la página')
+                ok = False
+        except Exception as error:  # noqa: BLE001
+            print(f'ERROR con la página o Instagram: {error}')
+            ok = False
+
+    r2 = ('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT')
+    absent = [name for name in r2 if not os.environ.get(name)]
+    if absent:
+        print(f"FALTAN los secrets de R2: {', '.join(absent)}")
+        ok = False
+    else:
+        import boto3
+        import requests
+
+        bucket = os.environ.get('R2_BUCKET', 'c2tech-social')
+        base = os.environ.get('MEDIA_BASE_URL', 'https://media.c2tech.com.py').rstrip('/')
+        key = f"_verificacion/{dt.datetime.now(dt.timezone.utc):%Y%m%d%H%M%S}.txt"
+        s3 = boto3.client('s3', endpoint_url=os.environ['R2_ENDPOINT'],
+                          aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
+                          aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name='auto')
+        try:
+            s3.put_object(Bucket=bucket, Key=key, Body=b'ok', ContentType='text/plain')
+            response = requests.get(f'{base}/{key}', timeout=30)
+            if response.status_code == 200 and response.text == 'ok':
+                print(f'ok    R2: subida y lectura pública por {base}')
+            else:
+                print(f'ERROR R2: se subió pero {base}/{key} respondió {response.status_code}')
+                ok = False
+            s3.delete_object(Bucket=bucket, Key=key)
+        except Exception as error:  # noqa: BLE001
+            print(f'ERROR R2: {error}')
+            ok = False
+
+    return 0 if ok else 1
+
+
 # --- Programa -------------------------------------------------------------
 
 
@@ -231,7 +306,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--check', action='store_true', help='sólo valida los posts')
     parser.add_argument('--only', help='publica sólo este post, aunque no haya llegado su hora')
+    parser.add_argument('--verify', action='store_true', help='prueba el token y R2 sin publicar nada')
     args = parser.parse_args()
+
+    if args.verify:
+        return verify()
 
     try:
         posts = all_posts()
